@@ -1,0 +1,91 @@
+name: Publish Zarf Skeleton
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - zarf.yaml
+      - .github/workflows/publish-zarf-skeleton.yml
+  workflow_dispatch:
+    inputs:
+      registry_path:
+        description: "Path after ghcr.io/ (defaults to owner/repo)"
+        required: false
+        default: ""
+      zarf_version:
+        description: "Zarf version to install"
+        required: false
+        default: "v0.83.0"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-skeleton:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Resolve registry path
+        id: registry
+        shell: bash
+        env:
+          REGISTRY_PATH_INPUT: ${{ inputs.registry_path }}
+        run: |
+          set -euo pipefail
+          REGISTRY_PATH="${REGISTRY_PATH_INPUT}"
+          if [ -z "${REGISTRY_PATH}" ]; then
+            REGISTRY_PATH="${GITHUB_REPOSITORY}"
+          fi
+          REGISTRY_PATH="${REGISTRY_PATH,,}"
+          if [[ ! "${REGISTRY_PATH}" =~ ^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$ ]]; then
+            echo "Invalid registry path: ${REGISTRY_PATH}" >&2
+            exit 1
+          fi
+          echo "oci_url=oci://ghcr.io/${REGISTRY_PATH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install zarf
+        shell: bash
+        env:
+          ZARF_VERSION_INPUT: ${{ inputs.zarf_version }}
+        run: |
+          set -euo pipefail
+          ZARF_VERSION="${ZARF_VERSION_INPUT}"
+          if [ -z "${ZARF_VERSION}" ]; then
+            ZARF_VERSION="v0.83.0"
+          fi
+          if [[ "${ZARF_VERSION}" != v* ]]; then
+            ZARF_VERSION="v${ZARF_VERSION}"
+          fi
+          if [[ ! "${ZARF_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid Zarf version: ${ZARF_VERSION}" >&2
+            exit 1
+          fi
+
+          ZARF_BINARY="zarf_${ZARF_VERSION}_Linux_amd64"
+          RELEASE_URL="https://github.com/zarf-dev/zarf/releases/download/${ZARF_VERSION}"
+          curl -fsSL "${RELEASE_URL}/${ZARF_BINARY}" -o "${ZARF_BINARY}"
+          curl -fsSL "${RELEASE_URL}/checksums.txt" -o checksums.txt
+          grep "  ${ZARF_BINARY}$" checksums.txt | sha256sum --check --strict -
+          chmod +x "${ZARF_BINARY}"
+          sudo mv "${ZARF_BINARY}" /usr/local/bin/zarf
+          zarf version
+
+      - name: Login to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          zarf tools registry login ghcr.io --username "${GITHUB_ACTOR}" --password "${GHCR_TOKEN}"
+
+      - name: Publish skeleton package
+        shell: bash
+        env:
+          OCI_URL: ${{ steps.registry.outputs.oci_url }}
+        run: |
+          set -euo pipefail
+          zarf package publish . "${OCI_URL}" --with-build-machine-info --confirm
